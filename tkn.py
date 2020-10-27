@@ -1,67 +1,109 @@
 import tensorflow as tf
-from tensorflow import keras as k
-from tensorflow.keras.models import *
-from tensorflow.keras.layers import *
 import numpy as np
 
-class TKN(k.models.Model):
-  def __init__(self, seq_len, d_k, d_v, n_heads, ff_dim):
+class TKN(tf.keras.layers.Layer):
+  def __init__(self, num_layers, d_model, num_heads, dff, input_dim, output_dim,
+               maximum_position_encoding, rate=0.1):
     super(TKN, self).__init__()
 
-    self.seq_len = seq_len
+    self.d_model = d_model
+    self.num_layers = num_layers
 
-    self.time_embedding = Time2Vector(seq_len);
-    self.attn1 = TransformerEncoder(d_k, d_v, n_heads, ff_dim);
-    self.attn2 = TransformerEncoder(d_k, d_v, n_heads, ff_dim);
-    self.attn3 = TransformerEncoder(d_k, d_v, n_heads, ff_dim);
+    # TODO: use custom embedding?
+    #self.embedding = StockEmbedding(input_dim, d_model)
+    #self.embedding = tf.keras.layers.Embedding(input_dim, d_model)
+    # TODO: the below dimension should be based on the output dimension of the embedding layer
+    self.enc_dim = 4
 
-  def call(self, x):
-    #x = Input(shape=(self.seq_len,))
-    input = x
-    x = self.time_embedding(x);
-    x = Concatenate(axis=-1)([input, x])
-    x = self.attn1((x, x, x))
-    x = self.attn2((x, x, x))
-    x = self.attn3((x, x, x))
-    x = GlobalAveragePooling1D(data_format='channels_first')(x)
-    x = Dropout(0.1)(x)
-    # x = Dense(64, activation='relu')(x)
-    # x = Dropout(0.1)(x)
-    # x = Dense(1, activation='linear')(x)
-    return x
+    self.pos_encoding = positional_encoding(maximum_position_encoding,
+                                            self.enc_dim)
+
+    self.tkn_layers = [TKNLayer(d_model, num_heads, dff, rate)
+                       for _ in range(num_layers)]
+
+    self.dropout = tf.keras.layers.Dropout(rate)
+
+  def call(self, x, training):
+    seq_len = tf.shape(x)[1]
+
+    # adding embedding and position encoding.
+    #x = self.embedding(x)  # (batch_size, input_seq_len, d_model)
+    #x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
+    x += self.pos_encoding[:, :seq_len, :]
+
+    x = self.dropout(x, training=training)
+
+    for i in range(self.num_layers):
+      x = self.tkn_layers[i](x, training)
+
+    return x  # (batch_size, input_seq_len, d_model)
+
+class TKNLayer(tf.keras.layers.Layer):
+  def __init__(self, d_model, num_heads, dff, rate=0.1):
+    super(TKNLayer, self).__init__()
+
+    self.mha = MultiHeadAttention(d_model, num_heads)
+    self.ffn = point_wise_feed_forward_network(d_model, dff)
+
+    self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+    self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+
+    self.dropout1 = tf.keras.layers.Dropout(rate)
+    self.dropout2 = tf.keras.layers.Dropout(rate)
+
+  def call(self, x, training):
+    attn_output, _ = self.mha(x, x, x)  # (batch_size, input_seq_len, d_model)
+    attn_output = self.dropout1(attn_output, training=training)
+    out1 = self.layernorm1(x + attn_output)  # (batch_size, input_seq_len, d_model)
+
+    ffn_output = self.ffn(out1)  # (batch_size, input_seq_len, d_model)
+    ffn_output = self.dropout2(ffn_output, training=training)
+    out2 = self.layernorm2(out1 + ffn_output)  # (batch_size, input_seq_len, d_model)
+
+    return out2
+
+class StockEmbedding(tf.keras.layers.Layer):
+    def __init__(self, input_dim, output_dim):
+        super(StockEmbedding, self).__init__()
+        self.hidden_dim1 = 128
+        self.hidden_dim2 = 128
+        self.dense1 = tf.keras.layers.Dense(self.hidden_dim1)
+        self.dense2 = tf.keras.layers.Dense(self.hidden_dim2)
+        self.dense3 = tf.keras.layers.Dense(output_dim)
+    def call(self, x):
+        x = self.dense1(x)
+        x = self.dense2(x)
+        x = self.dense3(x)
+        return x
+
+def get_angles(pos, i, d_model):
+  angle_rates = 1 / np.power(10000, (2 * (i//2)) / np.float32(d_model))
+  return pos * angle_rates
 
 def positional_encoding(position, d_model):
-    def get_angles(pos, i):
-        angle_rates = 1 / np.power(10000, (2 * (i//2)) / np.float32(d_model))
-        return pos * angle_rates
-
-    angle_rads = get_angles(np.arange(position)[:, np.newaxis],
+  angle_rads = get_angles(np.arange(position)[:, np.newaxis],
                           np.arange(d_model)[np.newaxis, :],
                           d_model)
 
-    # apply sin to even indices in the array; 2i
-    angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
+  # apply sin to even indices in the array; 2i
+  angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
 
-    # apply cos to odd indices in the array; 2i+1
-    angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
+  # apply cos to odd indices in the array; 2i+1
+  angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
 
-    pos_encoding = angle_rads[np.newaxis, ...]
+  pos_encoding = angle_rads[np.newaxis, ...]
 
-    return tf.cast(pos_encoding, dtype=tf.float32)
+  return tf.cast(pos_encoding, dtype=tf.float32)
 
-def scaled_dot_product_attention(q, k, v, mask):
+def scaled_dot_product_attention(q, k, v):
   """Calculate the attention weights.
   q, k, v must have matching leading dimensions.
   k, v must have matching penultimate dimension, i.e.: seq_len_k = seq_len_v.
-  The mask has different shapes depending on its type(padding or look ahead)
-  but it must be broadcastable for addition.
 
   Args:
     q: query shape == (..., seq_len_q, depth)
     k: key shape == (..., seq_len_k, depth)
     v: value shape == (..., seq_len_v, depth_v)
-    mask: Float tensor with shape broadcastable
-          to (..., seq_len_q, seq_len_k). Defaults to None.
 
   Returns:
     output, attention_weights
@@ -72,10 +114,6 @@ def scaled_dot_product_attention(q, k, v, mask):
   # scale matmul_qk
   dk = tf.cast(tf.shape(k)[-1], tf.float32)
   scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
-
-  # add the mask to the scaled tensor.
-  if mask is not None:
-    scaled_attention_logits += (mask * -1e9)
 
   # softmax is normalized on the last axis (seq_len_k) so that the scores
   # add up to 1.
@@ -107,8 +145,8 @@ class MultiHeadAttention(tf.keras.layers.Layer):
     """
     x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
     return tf.transpose(x, perm=[0, 2, 1, 3])
-    
-  def call(self, v, k, q, mask):
+
+  def call(self, v, k, q):
     batch_size = tf.shape(q)[0]
 
     q = self.wq(q)  # (batch_size, seq_len, d_model)
@@ -122,7 +160,7 @@ class MultiHeadAttention(tf.keras.layers.Layer):
     # scaled_attention.shape == (batch_size, num_heads, seq_len_q, depth)
     # attention_weights.shape == (batch_size, num_heads, seq_len_q, seq_len_k)
     scaled_attention, attention_weights = scaled_dot_product_attention(
-        q, k, v, mask)
+        q, k, v)
 
     scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])  # (batch_size, seq_len_q, num_heads, depth)
 
@@ -134,7 +172,7 @@ class MultiHeadAttention(tf.keras.layers.Layer):
     return output, attention_weights
 
 def point_wise_feed_forward_network(d_model, dff):
-  return tf.keras.Sequential([
-      tf.keras.layers.Dense(dff, activation='relu'),  # (batch_size, seq_len, dff)
-      tf.keras.layers.Dense(d_model)  # (batch_size, seq_len, d_model)
-  ])
+    return tf.keras.Sequential([
+        tf.keras.layers.Dense(dff, activation='relu'),  # (batch_size, seq_len, dff
+        tf.keras.layers.Dense(d_model)  # (batch_size, seq_len, d_model
+    ])
