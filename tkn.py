@@ -13,7 +13,10 @@ class TKN(tf.keras.layers.Layer):
     #self.embedding = StockEmbedding(input_dim, d_model)
     #self.embedding = tf.keras.layers.Embedding(input_dim, d_model)
     # TODO: the below dimension should be based on the output dimension of the embedding layer
-    self.enc_dim = 4
+
+    self.enc_dim = d_model
+    self.dense1 = tf.keras.layers.Dense(self.enc_dim)
+    #self.paddings = tf.constant([[0,0],[0,0],[0, self.enc_dim - input_dim]])
 
     self.pos_encoding = positional_encoding(maximum_position_encoding,
                                             self.enc_dim)
@@ -25,6 +28,9 @@ class TKN(tf.keras.layers.Layer):
 
   def call(self, x, training):
     seq_len = tf.shape(x)[1]
+
+    #x = tf.pad(x, self.paddings, "CONSTANT")
+    x = self.dense1(x)
 
     # adding embedding and position encoding.
     #x = self.embedding(x)  # (batch_size, input_seq_len, d_model)
