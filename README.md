@@ -6,6 +6,8 @@ Introducing uncertainty to transformers!
 
 Graphs and example graphs contains output graphs.
 
+(/training.gif)
+
 Work in Progress
 
 Paper coming soon
