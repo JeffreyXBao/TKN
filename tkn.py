@@ -1,184 +1,363 @@
-import tensorflow as tf
-import numpy as np
+import torch
+import torch.nn as nn
 
-class TKN(tf.keras.layers.Layer):
-  def __init__(self, num_layers, d_model, num_heads, dff, input_dim, output_dim,
-               maximum_position_encoding, rate=0.1):
-    super(TKN, self).__init__()
+class TKN(nn.Module):
+    def __init__(self, encoder, decoder, src_pad_idx, trg_pad_idx, device):
+        super().__init__()
 
-    self.d_model = d_model
-    self.num_layers = num_layers
+        self.encoder = encoder
+        self.decoder = decoder
+        self.src_pad_idx = src_pad_idx
+        self.trg_pad_idx = trg_pad_idx
+        self.device = device
 
-    # TODO: use custom embedding?
-    #self.embedding = StockEmbedding(input_dim, d_model)
-    #self.embedding = tf.keras.layers.Embedding(input_dim, d_model)
-    # TODO: the below dimension should be based on the output dimension of the embedding layer
+    def make_pad_mask(self, matrix, pad):
+        #TODO: more efficient way?
+        batch_size = matrix.shape[0]
+        src_len = matrix.shape[1]
 
-    self.enc_dim = d_model
-    self.dense1 = tf.keras.layers.Dense(self.enc_dim)
-    #self.paddings = tf.constant([[0,0],[0,0],[0, self.enc_dim - input_dim]])
+        pad_mask = (matrix != pad).all(dim=2)
 
-    self.pos_encoding = positional_encoding(maximum_position_encoding,
-                                            self.enc_dim)
+        return torch.reshape(pad_mask, (batch_size, 1, 1, src_len))
 
-    self.tkn_layers = [TKNLayer(d_model, num_heads, dff, rate)
-                       for _ in range(num_layers)]
+    def make_src_mask(self, src):
 
-    self.dropout = tf.keras.layers.Dropout(rate)
+        #src = [batch size, src len, vec_dim]
 
-  def call(self, x, training):
-    seq_len = tf.shape(x)[1]
+        src_mask = self.make_pad_mask(src, self.src_pad_idx)
 
-    #x = tf.pad(x, self.paddings, "CONSTANT")
-    x = self.dense1(x)
+        #src_mask = torch.ones((src_len, src_len), device=self.device).bool()
 
-    # adding embedding and position encoding.
-    #x = self.embedding(x)  # (batch_size, input_seq_len, d_model)
-    #x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
-    x += self.pos_encoding[:, :seq_len, :]
+        #src_mask = [batch size, 1, 1, src len]
 
-    x = self.dropout(x, training=training)
+        return src_mask
 
-    for i in range(self.num_layers):
-      x = self.tkn_layers[i](x, training)
+    def make_trg_mask(self, trg):
+        trg_len = trg.shape[1]
+        #trg = [batch size, trg len]
 
-    return x  # (batch_size, input_seq_len, d_model)
+        trg_pad_mask = self.make_pad_mask(trg, self.trg_pad_idx)
 
-class TKNLayer(tf.keras.layers.Layer):
-  def __init__(self, d_model, num_heads, dff, rate=0.1):
-    super(TKNLayer, self).__init__()
+        #trg_pad_mask = [batch size, 1, 1, trg len]
 
-    self.mha = MultiHeadAttention(d_model, num_heads)
-    self.ffn = point_wise_feed_forward_network(d_model, dff)
+        trg_sub_mask = torch.tril(torch.ones((trg_len, trg_len), device = self.device)).bool()
 
-    self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-    self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        #trg_sub_mask = [trg len, trg len]
 
-    self.dropout1 = tf.keras.layers.Dropout(rate)
-    self.dropout2 = tf.keras.layers.Dropout(rate)
+        trg_mask = trg_pad_mask & trg_sub_mask
 
-  def call(self, x, training):
-    attn_output, _ = self.mha(x, x, x)  # (batch_size, input_seq_len, d_model)
-    attn_output = self.dropout1(attn_output, training=training)
-    out1 = self.layernorm1(x + attn_output)  # (batch_size, input_seq_len, d_model)
+        #trg_mask = [batch size, 1, trg len, trg len]
 
-    ffn_output = self.ffn(out1)  # (batch_size, input_seq_len, d_model)
-    ffn_output = self.dropout2(ffn_output, training=training)
-    out2 = self.layernorm2(out1 + ffn_output)  # (batch_size, input_seq_len, d_model)
+        return trg_mask
 
-    return out2
+    def forward(self, src, trg):
 
-class StockEmbedding(tf.keras.layers.Layer):
-    def __init__(self, input_dim, output_dim):
-        super(StockEmbedding, self).__init__()
-        self.hidden_dim1 = 128
-        self.hidden_dim2 = 128
-        self.dense1 = tf.keras.layers.Dense(self.hidden_dim1)
-        self.dense2 = tf.keras.layers.Dense(self.hidden_dim2)
-        self.dense3 = tf.keras.layers.Dense(output_dim)
-    def call(self, x):
-        x = self.dense1(x)
-        x = self.dense2(x)
-        x = self.dense3(x)
+        #src = [batch size, src len]
+        #trg = [batch size, trg len]
+
+        src_mask = self.make_src_mask(src)
+        trg_mask = self.make_trg_mask(trg)
+
+        #src_mask = [batch size, 1, 1, src len]
+        #trg_mask = [batch size, 1, trg len, trg len]
+
+        enc_src = self.encoder(src, src_mask)
+
+        #enc_src = [batch size, src len, hid dim]
+
+        output = self.decoder(trg, enc_src, trg_mask, src_mask)
+
+        #output = [batch size, trg len, output dim]
+        #attention = [batch size, n heads, trg len, src len]
+
+        return output
+
+class PsuedoEmbedding(nn.Module):
+    def __init__(self, input_dim, hid_dim, n_layers):
+        super().__init__()
+
+        self.fc1 = nn.Linear(input_dim, hid_dim)
+        self.layers = nn.ModuleList([nn.Linear(hid_dim, hid_dim) for _ in range(n_layers-1)])
+
+    def forward(self, inp):
+        inp = self.fc1(inp)
+        for layer in self.layers:
+            inp = layer(inp)
+        return inp
+
+class Encoder(nn.Module):
+    def __init__(self, input_dim, hid_dim, n_layers, n_heads, pf_dim, dropout, device, max_length=100, penc_layers=1):
+        super().__init__()
+
+        self.device = device
+
+        #self.tok_embedding = nn.Embedding(input_dim, hid_dim)
+        self.psuedo_embedding = PsuedoEmbedding(input_dim, hid_dim, penc_layers)
+        self.pos_embedding = nn.Embedding(max_length, hid_dim)
+
+        self.layers = nn.ModuleList([EncoderLayer(hid_dim, n_heads, pf_dim, dropout, device) for _ in range(n_layers)])
+
+        self.dropout = nn.Dropout(dropout)
+
+        self.scale = torch.sqrt(torch.FloatTensor([hid_dim])).to(device)
+
+    def forward(self, src, src_mask):
+
+        #src = [batch size, src len]
+        #src_mask = [batch size, src len]
+
+        batch_size = src.shape[0]
+        src_len = src.shape[1]
+
+        pos = torch.arange(0, src_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
+
+        #pos = [batch size, src len]
+
+        src = self.dropout((self.psuedo_embedding(src) * self.scale) + self.pos_embedding(pos))
+
+        #src = [batch size, src len, hid dim]
+
+        for layer in self.layers:
+            src = layer(src, src_mask)
+
+        #src = [batch size, src len, hid dim]
+
+        return src
+
+
+class Decoder(nn.Module):
+    def __init__(self, output_dim, hid_dim, n_layers, n_heads, pf_dim, dropout, device, max_length=100, penc_layers=1):
+        super().__init__()
+
+        self.device = device
+
+        #self.tok_embedding = nn.Embedding(output_dim, hid_dim)
+        self.psuedo_embedding = PsuedoEmbedding(output_dim, hid_dim, penc_layers)
+        self.pos_embedding = nn.Embedding(max_length, hid_dim)
+
+        self.layers = nn.ModuleList([DecoderLayer(hid_dim, n_heads, pf_dim, dropout, device) for _ in range(n_layers)])
+
+        self.fc_out = nn.Linear(hid_dim, output_dim)
+
+        self.dropout = nn.Dropout(dropout)
+
+        self.scale = torch.sqrt(torch.FloatTensor([hid_dim])).to(device)
+
+    def forward(self, trg, enc_src, trg_mask, src_mask):
+
+        #trg = [batch size, trg len]
+        #enc_src = [batch size, src len, hid dim]
+        #trg_mask = [batch size, trg len]
+        #src_mask = [batch size, src len]
+
+        batch_size = trg.shape[0]
+        trg_len = trg.shape[1]
+
+        pos = torch.arange(0, trg_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
+
+        #pos = [batch size, trg len]
+
+        trg = self.dropout((self.psuedo_embedding(trg) * self.scale) + self.pos_embedding(pos))
+
+        #trg = [batch size, trg len, hid dim]
+
+        for layer in self.layers:
+            trg, att = layer(trg, enc_src, trg_mask, src_mask)
+
+        #trg = [batch size, trg len, hid dim]
+        #attention = [batch size, n heads, trg len, src len]
+
+        output = self.fc_out(trg)
+
+        #output = [batch size, trg len, output dim]
+
+        return output
+
+class EncoderLayer(nn.Module):
+    def __init__(self,
+                 hid_dim,
+                 n_heads,
+                 pf_dim,
+                 dropout,
+                 device):
+        super().__init__()
+
+        self.self_attn_layer_norm = nn.LayerNorm(hid_dim)
+        self.ff_layer_norm = nn.LayerNorm(hid_dim)
+        self.self_attention = MultiHeadAttentionLayer(hid_dim, n_heads, dropout, device)
+        self.positionwise_feedforward = PositionwiseFeedforwardLayer(hid_dim,
+                                                                     pf_dim,
+                                                                     dropout)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, src, src_mask):
+
+        #src = [batch size, src len, hid dim]
+        #src_mask = [batch size, src len]
+
+        #self attention
+        _src, _ = self.self_attention(src, src, src, src_mask)
+
+        #dropout, residual connection and layer norm
+        src = self.self_attn_layer_norm(src + self.dropout(_src))
+
+        #src = [batch size, src len, hid dim]
+
+        #positionwise feedforward
+        _src = self.positionwise_feedforward(src)
+
+        #dropout, residual and layer norm
+        src = self.ff_layer_norm(src + self.dropout(_src))
+
+        #src = [batch size, src len, hid dim]
+
+        return src
+
+class DecoderLayer(nn.Module):
+    def __init__(self,
+                 hid_dim,
+                 n_heads,
+                 pf_dim,
+                 dropout,
+                 device):
+        super().__init__()
+
+        self.self_attn_layer_norm = nn.LayerNorm(hid_dim)
+        self.enc_attn_layer_norm = nn.LayerNorm(hid_dim)
+        self.ff_layer_norm = nn.LayerNorm(hid_dim)
+        self.self_attention = MultiHeadAttentionLayer(hid_dim, n_heads, dropout, device)
+        self.encoder_attention = MultiHeadAttentionLayer(hid_dim, n_heads, dropout, device)
+        self.positionwise_feedforward = PositionwiseFeedforwardLayer(hid_dim,
+                                                                     pf_dim,
+                                                                     dropout)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, trg, enc_src, trg_mask, src_mask):
+
+        #trg = [batch size, trg len, hid dim]
+        #enc_src = [batch size, src len, hid dim]
+        #trg_mask = [batch size, trg len]
+        #src_mask = [batch size, src len]
+
+        #self attention
+        _trg, _ = self.self_attention(trg, trg, trg, trg_mask)
+
+        #dropout, residual connection and layer norm
+        trg = self.self_attn_layer_norm(trg + self.dropout(_trg))
+
+        #trg = [batch size, trg len, hid dim]
+
+        #encoder attention
+        _trg, attention = self.encoder_attention(trg, enc_src, enc_src, src_mask)
+
+        #dropout, residual connection and layer norm
+        trg = self.enc_attn_layer_norm(trg + self.dropout(_trg))
+
+        #trg = [batch size, trg len, hid dim]
+
+        #positionwise feedforward
+        _trg = self.positionwise_feedforward(trg)
+
+        #dropout, residual and layer norm
+        trg = self.ff_layer_norm(trg + self.dropout(_trg))
+
+        #trg = [batch size, trg len, hid dim]
+        #attention = [batch size, n heads, trg len, src len]
+
+        return trg, attention
+
+class MultiHeadAttentionLayer(nn.Module):
+    def __init__(self, hid_dim, n_heads, dropout, device):
+        super().__init__()
+
+        assert hid_dim % n_heads == 0
+
+        self.hid_dim = hid_dim
+        self.n_heads = n_heads
+        self.head_dim = hid_dim // n_heads
+
+        self.fc_q = nn.Linear(hid_dim, hid_dim)
+        self.fc_k = nn.Linear(hid_dim, hid_dim)
+        self.fc_v = nn.Linear(hid_dim, hid_dim)
+
+        self.fc_o = nn.Linear(hid_dim, hid_dim)
+
+        self.dropout = nn.Dropout(dropout)
+
+        self.scale = torch.sqrt(torch.FloatTensor([self.head_dim])).to(device)
+
+    def forward(self, query, key, value, mask = None):
+
+        batch_size = query.shape[0]
+
+        #query = [batch size, query len, hid dim]
+        #key = [batch size, key len, hid dim]
+        #value = [batch size, value len, hid dim]
+
+        Q = self.fc_q(query)
+        K = self.fc_k(key)
+        V = self.fc_v(value)
+
+        #Q = [batch size, query len, hid dim]
+        #K = [batch size, key len, hid dim]
+        #V = [batch size, value len, hid dim]
+
+        Q = Q.view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        K = K.view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        V = V.view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+
+        #Q = [batch size, n heads, query len, head dim]
+        #K = [batch size, n heads, key len, head dim]
+        #V = [batch size, n heads, value len, head dim]
+
+        energy = torch.matmul(Q, K.permute(0, 1, 3, 2)) / self.scale
+
+        #energy = [batch size, n heads, query len, key len]
+
+        if mask is not None:
+            energy = energy.masked_fill(mask == 0, -1e10)
+
+        attention = torch.softmax(energy, dim = -1)
+
+        #attention = [batch size, n heads, query len, key len]
+
+        x = torch.matmul(self.dropout(attention), V)
+
+        #x = [batch size, n heads, query len, head dim]
+
+        x = x.permute(0, 2, 1, 3).contiguous()
+
+        #x = [batch size, query len, n heads, head dim]
+
+        x = x.view(batch_size, -1, self.hid_dim)
+
+        #x = [batch size, query len, hid dim]
+
+        x = self.fc_o(x)
+
+        #x = [batch size, query len, hid dim]
+
+        return x, attention
+
+class PositionwiseFeedforwardLayer(nn.Module):
+    def __init__(self, hid_dim, pf_dim, dropout):
+        super().__init__()
+
+        self.fc_1 = nn.Linear(hid_dim, pf_dim)
+        self.fc_2 = nn.Linear(pf_dim, hid_dim)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+
+        #x = [batch size, seq len, hid dim]
+
+        x = self.dropout(torch.relu(self.fc_1(x)))
+
+        #x = [batch size, seq len, pf dim]
+
+        x = self.fc_2(x)
+
+        #x = [batch size, seq len, hid dim]
+
         return x
-
-def get_angles(pos, i, d_model):
-  angle_rates = 1 / np.power(10000, (2 * (i//2)) / np.float32(d_model))
-  return pos * angle_rates
-
-def positional_encoding(position, d_model):
-  angle_rads = get_angles(np.arange(position)[:, np.newaxis],
-                          np.arange(d_model)[np.newaxis, :],
-                          d_model)
-
-  # apply sin to even indices in the array; 2i
-  angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
-
-  # apply cos to odd indices in the array; 2i+1
-  angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
-
-  pos_encoding = angle_rads[np.newaxis, ...]
-
-  return tf.cast(pos_encoding, dtype=tf.float32)
-
-def scaled_dot_product_attention(q, k, v):
-  """Calculate the attention weights.
-  q, k, v must have matching leading dimensions.
-  k, v must have matching penultimate dimension, i.e.: seq_len_k = seq_len_v.
-
-  Args:
-    q: query shape == (..., seq_len_q, depth)
-    k: key shape == (..., seq_len_k, depth)
-    v: value shape == (..., seq_len_v, depth_v)
-
-  Returns:
-    output, attention_weights
-  """
-
-  matmul_qk = tf.matmul(q, k, transpose_b=True)  # (..., seq_len_q, seq_len_k)
-
-  # scale matmul_qk
-  dk = tf.cast(tf.shape(k)[-1], tf.float32)
-  scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
-
-  # softmax is normalized on the last axis (seq_len_k) so that the scores
-  # add up to 1.
-  attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)  # (..., seq_len_q, seq_len_k)
-
-  output = tf.matmul(attention_weights, v)  # (..., seq_len_q, depth_v)
-
-  return output, attention_weights
-
-class MultiHeadAttention(tf.keras.layers.Layer):
-  def __init__(self, d_model, num_heads):
-    super(MultiHeadAttention, self).__init__()
-    self.num_heads = num_heads
-    self.d_model = d_model
-
-    assert d_model % self.num_heads == 0
-
-    self.depth = d_model // self.num_heads
-
-    self.wq = tf.keras.layers.Dense(d_model)
-    self.wk = tf.keras.layers.Dense(d_model)
-    self.wv = tf.keras.layers.Dense(d_model)
-
-    self.dense = tf.keras.layers.Dense(d_model)
-
-  def split_heads(self, x, batch_size):
-    """Split the last dimension into (num_heads, depth).
-    Transpose the result such that the shape is (batch_size, num_heads, seq_len, depth)
-    """
-    x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
-    return tf.transpose(x, perm=[0, 2, 1, 3])
-
-  def call(self, v, k, q):
-    batch_size = tf.shape(q)[0]
-
-    q = self.wq(q)  # (batch_size, seq_len, d_model)
-    k = self.wk(k)  # (batch_size, seq_len, d_model)
-    v = self.wv(v)  # (batch_size, seq_len, d_model)
-
-    q = self.split_heads(q, batch_size)  # (batch_size, num_heads, seq_len_q, depth)
-    k = self.split_heads(k, batch_size)  # (batch_size, num_heads, seq_len_k, depth)
-    v = self.split_heads(v, batch_size)  # (batch_size, num_heads, seq_len_v, depth)
-
-    # scaled_attention.shape == (batch_size, num_heads, seq_len_q, depth)
-    # attention_weights.shape == (batch_size, num_heads, seq_len_q, seq_len_k)
-    scaled_attention, attention_weights = scaled_dot_product_attention(
-        q, k, v)
-
-    scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])  # (batch_size, seq_len_q, num_heads, depth)
-
-    concat_attention = tf.reshape(scaled_attention,
-                                  (batch_size, -1, self.d_model))  # (batch_size, seq_len_q, d_model)
-
-    output = self.dense(concat_attention)  # (batch_size, seq_len_q, d_model)
-
-    return output, attention_weights
-
-def point_wise_feed_forward_network(d_model, dff):
-    return tf.keras.Sequential([
-        tf.keras.layers.Dense(dff, activation='relu'),  # (batch_size, seq_len, dff
-        tf.keras.layers.Dense(d_model)  # (batch_size, seq_len, d_model
-    ])
