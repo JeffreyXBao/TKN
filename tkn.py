@@ -77,7 +77,7 @@ class PsuedoEmbedding(nn.Module):
         super().__init__()
 
         self.fc1 = nn.Linear(input_dim, hid_dim)
-        self.layers = nn.ModuleList([nn.Linear(hid_dim, hid_dim) for _ in range(n_layers-1)])
+        self.layers = nn.ModuleList([nn.Linear(hid_dim, hid_dim) for _ in range(n_layers)])
 
     def forward(self, inp):
         inp = self.fc1(inp)
@@ -126,7 +126,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, output_dim, hid_dim, n_layers, n_heads, pf_dim, dropout, device, max_length=100, penc_layers=1):
+    def __init__(self, output_dim, hid_dim, n_layers, n_heads, pf_dim, dropout, device, max_length=100, penc_layers=1, out_layers=3):
         super().__init__()
 
         self.device = device
@@ -137,7 +137,8 @@ class Decoder(nn.Module):
 
         self.layers = nn.ModuleList([DecoderLayer(hid_dim, n_heads, pf_dim, dropout, device) for _ in range(n_layers)])
 
-        self.fc_out = nn.Linear(hid_dim, output_dim)
+        #self.fc_out = nn.Linear(hid_dim, output_dim)
+        self.fc_out = OutLayer(hid_dim, output_dim, out_layers)
 
         self.dropout = nn.Dropout(dropout)
 
@@ -267,7 +268,7 @@ class DecoderLayer(nn.Module):
         return trg, attention
 
 class MultiHeadAttentionLayer(nn.Module):
-    def __init__(self, hid_dim, n_heads, dropout, device):
+    def __init__(self, hid_dim, n_heads, dropout, device, fc_layers=5):
         super().__init__()
 
         assert hid_dim % n_heads == 0
@@ -276,9 +277,12 @@ class MultiHeadAttentionLayer(nn.Module):
         self.n_heads = n_heads
         self.head_dim = hid_dim // n_heads
 
-        self.fc_q = nn.Linear(hid_dim, hid_dim)
-        self.fc_k = nn.Linear(hid_dim, hid_dim)
-        self.fc_v = nn.Linear(hid_dim, hid_dim)
+        # self.fc_q = nn.Linear(hid_dim, hid_dim)
+        # self.fc_k = nn.Linear(hid_dim, hid_dim)
+        # self.fc_v = nn.Linear(hid_dim, hid_dim)
+        self.fc_q = OutLayer(hid_dim, hid_dim, fc_layers)
+        self.fc_k = OutLayer(hid_dim, hid_dim, fc_layers)
+        self.fc_v = OutLayer(hid_dim, hid_dim, fc_layers)
 
         self.fc_o = nn.Linear(hid_dim, hid_dim)
 
@@ -359,5 +363,21 @@ class PositionwiseFeedforwardLayer(nn.Module):
         x = self.fc_2(x)
 
         #x = [batch size, seq len, hid dim]
+
+        return x
+
+class OutLayer(nn.Module):
+    def __init__(self, in_dim, out_dim, hidden_layers):
+        super().__init__()
+
+        self.layers = nn.ModuleList([nn.Linear(in_dim, in_dim) for _ in range(hidden_layers)])
+
+        self.fc_final = nn.Linear(in_dim, out_dim)
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = torch.relu(layer(x))
+
+        x = self.fc_final(x)
 
         return x
