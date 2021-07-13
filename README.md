@@ -16,6 +16,6 @@ Example on stock data ($SPY):
 
 ![training](/training.gif)
 
-##Links
+## Links
 
 [Read the paper!](TKN.pdf)
