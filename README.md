@@ -1,8 +1,6 @@
-# TKN
-# By: Jeffrey Bao
-# Supervisor: Dr. Rudolf Lioutikov
-
-Introducing uncertainty to transformers!
+# TKN: Introducing uncertainty to transformers!
+By: Jeffrey Bao
+Supervisor: Dr. Rudolf Lioutikov
 
 ## Why?
 
