@@ -5,7 +5,7 @@ Supervisor: Dr. Rudolf Lioutikov
 
 ## Why?
 
-The goal of this project is to use adapt transformers to be usable for time series analysis. Specifically, this design allows for prediction of the future with a mean and variance estimate.
+The goal of this project is to adapt transformers to be usable for time series analysis. Specifically, this design allows for prediction of non-deterministic events with a mean and variance estimate.
 
 ## Examples
 
